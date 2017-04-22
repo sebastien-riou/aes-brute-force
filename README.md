@@ -1,8 +1,11 @@
 # aes-brute-force
-Using Intel AES-NI and c++ threads to search AES128 keys
+Using Intel AES-NI and c++ threads to search AES128 keys.
+Sometimes side channel attacks recover most key bytes but not all. This project allows to brute force remaining bytes on commodity hardware. On a i7-4770K CPU @ 3.50GHz, a CPU a few years old, 4 bytes takes under a minute, 5 bytes few hours. Time greatly varies depending on the most significant unknown byte as the search is done using natural order...
+
+The AES-NI code is a header only library.
 
 
-## Demo Windows with Intel(R) Core(TM) i7-4770K CPU @ 3.50GHz
+## Demo on Windows with Intel(R) Core(TM) i7-4770K CPU @ 3.50GHz
 ```
 F:\aes-brute-force>build_test.bat
 
