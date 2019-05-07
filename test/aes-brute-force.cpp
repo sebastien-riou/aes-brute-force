@@ -107,10 +107,18 @@ public:
     }
     static unsigned int mask_to_offsets(uint8_t key_mask[16], unsigned int offsets[16]){
         unsigned int n_offsets = 0;
+        int partial_byte_idx=-1;
         for(unsigned int i=0;i<16;i++){
             if(key_mask[i]){//byte granularity
+                if(key_mask[i]!=0xFF) partial_byte_idx=n_offsets;
                 offsets[n_offsets++] = i;
             }
+        }
+        if(partial_byte_idx>-1){
+            //put the partial byte at the last offset for optimal search
+            uint8_t tmp = offsets[n_offsets-1];
+            offsets[n_offsets-1] = offsets[partial_byte_idx];
+            offsets[partial_byte_idx] = tmp;
         }
         return n_offsets;
     }
@@ -126,9 +134,8 @@ public:
                         bool &found                        //output
                     ){
         uint8_t r[16];
-        //unsigned int nbits = n_offsets*8;
         uint64_t n_loops = 1;
-        uint64_t byte_range = byte_max;
+        uint64_t byte_range = byte_max+1;
         byte_range -= byte_min;
         n_loops = 1;
         for(unsigned int i=0;i<n_offsets;i++){
@@ -137,7 +144,12 @@ public:
         //printf("n_loops = %lu\n",n_loops);
         found=false;
         if((0==byte_min) && (0xFF==byte_max)){
-            for(loop_cnt=0;loop_cnt<n_loops;loop_cnt++){
+            loop_cnt=0;
+            uint8_t*loop_cnt8 = (uint8_t*)&loop_cnt;
+            for(unsigned int o=0;o<n_offsets;o++){
+                loop_cnt8[o] = key[offsets[o]];
+            }
+            for(;loop_cnt<n_loops;loop_cnt++){
                 uint64_t cnt=loop_cnt;
                 __m128i key_schedule[11];
                 for(unsigned int o=0;o<n_offsets;o++){
@@ -156,6 +168,12 @@ public:
         }else{
             uint8_t cnt8[16];
             memset(cnt8,byte_min,sizeof(cnt8));
+            for(unsigned int o=0;o<n_offsets;o++){
+                uint8_t b=key[offsets[o]];
+                if(b>byte_min){
+                    cnt8[o] = b;
+                }
+            }
             for(loop_cnt=0;loop_cnt<n_loops;loop_cnt++){
                 __m128i key_schedule[11];
                 for(unsigned int o=0;o<n_offsets;o++){
@@ -170,7 +188,9 @@ public:
                     return;
                 }
                 unsigned int b=0;
-                while(cnt8[b]==byte_max) b++;
+                for(b=0;b<16;b++){
+                    if(cnt8[b]!=byte_max) break;
+                }
                 for(unsigned int i=0;i<b;i++){
                     cnt8[i] = byte_min;
                 }
@@ -188,6 +208,15 @@ public:
         this->byte_max = byte_max;
 
         keys.push_back(k);
+        n_offsets = mask_to_offsets(key_mask, offsets);
+        nbits = n_offsets*8;
+    }
+    explicit aes_brute_force(uint8_t key_mask[16],uint8_t plain[16],uint8_t cipher[16], uint8_t byte_min, uint8_t byte_max){
+        memcpy(this->plain   ,plain   ,16);
+        memcpy(this->cipher  ,cipher  ,16);
+        this->byte_min = byte_min;
+        this->byte_max = byte_max;
+
         n_offsets = mask_to_offsets(key_mask, offsets);
         nbits = n_offsets*8;
     }
@@ -304,36 +333,82 @@ int main (int argc, char*argv[]){
         n_threads = 1;
         std::cout << "INFO: n_threads set to 1 because n_offsets=1"<< std::endl;
     }
-    if(1!=n_threads) {
-        jobs_key_mask[offsets[0]] = 0;//fix this key byte at the job level.
-    }
-    println_128("\tjobs_key_mask:",jobs_key_mask);
     std::vector<std::thread *> threads(n_threads);
     std::vector<aes_brute_force *> jobs(n_threads);
     aes_brute_force::reset();
 
-    unsigned int byte_range = byte_max;
+    int byte_range = byte_max+1;
     byte_range -= byte_min;
-    int n_keys_per_thread = n_threads==1 ? 0 : (byte_range+n_threads-1) / n_threads;
-    //printf("threads = %u\n",n_threads);
-    //printf("n_keys_per_thread = %d\n",n_keys_per_thread);
-    unsigned int jobs_cnt=0;
-    unsigned int job_byte_offset = 0;
-    for(unsigned int thread_i=0;thread_i<n_threads;thread_i++){
-        key_in[offsets[job_byte_offset]]=byte_min+jobs_cnt;
-        jobs_cnt++;
-        if(key_in[offsets[job_byte_offset]]>byte_max){
-            key_in[offsets[job_byte_offset]]=byte_max;
-            job_byte_offset++;
-            jobs_key_mask[offsets[job_byte_offset]] = 0;
-            key_in[offsets[job_byte_offset]]=byte_min;
+
+    //int bit_per_byte = 0;do{bit_per_byte++;}while((1<<bit_per_byte) < byte_range);//round up
+    int bit_per_byte = 1;while((1<<(bit_per_byte+1)) <= byte_range){bit_per_byte++;}//round down
+    //printf("bit_per_byte=%u\n",bit_per_byte);
+    //printf("byte_range=%u\n",byte_range);
+    if(n_threads>1){
+        uint32_t key_mask_width = 0;
+        uint32_t key_mask;
+        do{
+            key_mask_width++;
+            key_mask = 1<<key_mask_width;
+        }while(key_mask < n_threads);
+        unsigned int n_offsets=0;
+        for(unsigned int i=0;i<(key_mask_width+bit_per_byte-1)/bit_per_byte;i++){
+            jobs_key_mask[offsets[n_offsets++]] = 0;//fix those bits at the job level.
         }
-        jobs.at(thread_i) = new aes_brute_force(jobs_key_mask, key_in, plain, cipher, byte_min, byte_max);
-        for(int i=0;i<n_keys_per_thread-1;i++){
+        println_128("\tjobs_key_mask:",jobs_key_mask);
+
+        for(unsigned int thread_i=0;thread_i<n_threads;thread_i++){
+            jobs.at(thread_i) = new aes_brute_force(jobs_key_mask, plain, cipher, byte_min, byte_max);
+        }
+        //printf("n_offsets=%u\n",n_offsets);
+        uint32_t n_jobs=1;
+        for(unsigned int i=0;i<n_offsets;i++){n_jobs*=byte_range;}
+        printf("n_jobs=%u\n",n_jobs);
+        //fix jobs_key_mask bits of the key for each job
+        uint8_t cnt8[16];
+        memset(cnt8,byte_min,sizeof(cnt8));
+        unsigned int thread_i=0;
+        for(unsigned int i=0;i<n_jobs;i++){
+            for(unsigned int o=0;o<n_offsets;o++){
+                key_in[offsets[o]] = cnt8[o];
+            }
+            //printf("\t%4u ",i);println_128("job key:",key_in);
+            jobs.at(thread_i)->push(key_in);
+            thread_i=(thread_i+1)%n_threads;
+            unsigned int b=0;
+            for(b=0;b<16;b++){
+                if(cnt8[b]!=byte_max) break;
+            }
+            for(unsigned int i=0;i<b;i++){
+                cnt8[i] = byte_min;
+            }
+            cnt8[b]++;
+        }
+    }else{//old code which SEG FAULT when n_threads large and valid range for bytes narrow
+        if(n_threads>1){
+            jobs_key_mask[offsets[0]] = 0;
+        }
+        int n_keys_per_thread = n_threads==1 ? 0 : (byte_range+n_threads-1) / n_threads;
+        //printf("threads = %u\n",n_threads);
+        //printf("n_keys_per_thread = %d\n",n_keys_per_thread);
+        unsigned int jobs_cnt=0;
+        unsigned int job_byte_offset = 0;
+        for(unsigned int thread_i=0;thread_i<n_threads;thread_i++){
             key_in[offsets[job_byte_offset]]=byte_min+jobs_cnt;
             jobs_cnt++;
-            if(key_in[offsets[job_byte_offset]]<=byte_max)
-                jobs.at(thread_i)->push(key_in);
+            if(key_in[offsets[job_byte_offset]]>byte_max){
+                key_in[offsets[job_byte_offset]]=byte_max;
+                job_byte_offset++;
+                jobs_key_mask[offsets[job_byte_offset]] = 0;
+                key_in[offsets[job_byte_offset]]=byte_min;
+            }
+            jobs.at(thread_i) = new aes_brute_force(jobs_key_mask, key_in, plain, cipher, byte_min, byte_max);
+            for(int i=0;i<n_keys_per_thread-1;i++){
+                key_in[offsets[job_byte_offset]]=byte_min+jobs_cnt;
+                jobs_cnt++;
+                if(key_in[offsets[job_byte_offset]]<=byte_max)
+                    jobs.at(thread_i)->push(key_in);
+            }
         }
     }
     std::cout  << std::endl << "Launching " << n_offsets*8<< " bits search" << std::endl;
