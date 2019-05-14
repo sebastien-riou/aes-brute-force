@@ -45,7 +45,7 @@ void bytes_to_hexstr(char *dst,uint8_t *bytes, unsigned int nBytes){
     }
 }
 
-size_t cleanup_hexstr(char *hexstr, size_t hexstr_size, char *str, size_t str_size){
+size_t cleanup_hexstr(char *hexstr, size_t hexstr_size, const char *const str, size_t str_size){
     size_t cnt=0;
     int lastIs0=0;
     for(unsigned int j = 0;j<str_size;j++){
@@ -199,6 +199,59 @@ public:
         }
     }
 
+    static void search( unsigned int offsets[16],
+                        unsigned int n_offsets,
+                        uint8_t key[16],                    //I/O
+                        uint8_t plain[16],
+                        uint8_t cipher[16],
+                        uint8_t byte_min,
+                        uint8_t byte_max,
+                        uint8_t*valid_bytes,
+                        uint64_t byte_range,
+                        uint64_t &loop_cnt,                //output the number of iteration actually done
+                        bool &found                        //output
+                    ){
+        uint8_t r[16];
+        uint64_t n_loops = 1;
+        n_loops = 1;
+        for(unsigned int i=0;i<n_offsets;i++){
+            n_loops *= byte_range;
+        }
+        //printf("n_loops = %lu\n",n_loops);
+        found=false;
+
+        uint8_t cnt8[16];
+        memset(cnt8,byte_min,sizeof(cnt8));
+        for(unsigned int o=0;o<n_offsets;o++){
+            uint8_t b=key[offsets[o]];
+            if(b>byte_min){
+                cnt8[o] = b;
+            }
+        }
+        for(loop_cnt=0;loop_cnt<n_loops;loop_cnt++){
+            __m128i key_schedule[11];
+            for(unsigned int o=0;o<n_offsets;o++){
+                key[offsets[o]] = cnt8[o];
+            }
+            aes128_load_key_enc_only(key,key_schedule);
+            aes128_enc(key_schedule,plain,r);
+
+            if(0==memcmp(r,cipher,16)){
+                found=true;
+                done=true;
+                return;
+            }
+            unsigned int b=0;
+            for(b=0;b<16;b++){
+                if(cnt8[b]!=byte_max) break;
+            }
+            for(unsigned int i=0;i<b;i++){
+                cnt8[i] = byte_min;
+            }
+            cnt8[b]=valid_bytes[cnt8[b]];
+        }
+    }
+
     explicit aes_brute_force(uint8_t key_mask[16],uint8_t key[16],uint8_t plain[16],uint8_t cipher[16], uint8_t byte_min, uint8_t byte_max){
         aes128_key_t k;
         memcpy(&k            ,key     ,16);
@@ -216,6 +269,20 @@ public:
         memcpy(this->cipher  ,cipher  ,16);
         this->byte_min = byte_min;
         this->byte_max = byte_max;
+        this->byte_range = (byte_max-byte_min)+1;
+        this->continuous_range = 1;
+
+        n_offsets = mask_to_offsets(key_mask, offsets);
+        nbits = n_offsets*8;
+    }
+    explicit aes_brute_force(uint8_t key_mask[16],uint8_t plain[16],uint8_t cipher[16], uint8_t byte_min, uint8_t byte_max, uint8_t*valid_bytes, uint64_t byte_range){
+        memcpy(this->plain   ,plain   ,16);
+        memcpy(this->cipher  ,cipher  ,16);
+        this->byte_min = byte_min;
+        this->byte_max = byte_max;
+        memcpy(this->valid_bytes,valid_bytes,sizeof(this->valid_bytes));
+        this->byte_range = byte_range;
+        this->continuous_range = 0;
 
         n_offsets = mask_to_offsets(key_mask, offsets);
         nbits = n_offsets*8;
@@ -224,7 +291,8 @@ public:
         loop_cnt=0;
         for(auto k=keys.begin();k!=keys.end();++k){
             uint64_t cnt;
-            search(offsets, n_offsets, k->bytes, plain, cipher, byte_min,byte_max,cnt,found);
+            if(continuous_range) search(offsets, n_offsets, k->bytes, plain, cipher, byte_min,byte_max,cnt,found);
+            else search(offsets, n_offsets, k->bytes, plain, cipher, byte_min,byte_max,valid_bytes,byte_range,cnt,found);
             loop_cnt+=cnt;
             if(found){
                 memcpy(correct_key,k->bytes,16);
@@ -254,6 +322,9 @@ public:
     uint8_t cipher[16];
     uint8_t byte_min;
     uint8_t byte_max;
+    uint8_t valid_bytes[256];
+    uint64_t byte_range;
+    bool continuous_range;
 };
 bool aes_brute_force::done=false;
 
@@ -285,7 +356,8 @@ int main (int argc, char*argv[]){
         bool test_demo = false;
     if( (argc<2) || ((argc>1) && (strlen(argv[1])<16)) ){
         std::cerr << "AES128 encryption key brute force search" << std::endl;
-        std::cerr << "Usage: " << argv[0] << " <key_mask> <key_in> <plain> <cipher> [byte_min] [byte_max] [n_threads]" << std::endl;
+        std::cerr << "Usage 1: " << argv[0] << " <key_mask> <key_in> <plain> <cipher> [byte_min] [byte_max] [n_threads]" << std::endl;
+        std::cerr << "Usage 2: " << argv[0] << " <key_mask> <key_in> <plain> <cipher> restrict <sorted list of bytes> [n_threads]" << std::endl;
         std::cerr << std::endl;
         std::cerr << "launching test/demo..." << std::endl << std::endl;
         argc = 5;
@@ -304,14 +376,14 @@ int main (int argc, char*argv[]){
     len=user_hexstr_to_bytes(cipher  ,16,argv[4],strlen(argv[4])+1);assert(16==len);
     unsigned int n_threads = std::thread::hardware_concurrency();
     if(0==n_threads) n_threads=1;
+    int usage=1;
     if(argc>5){
-        byte_min= std::stoi(argv[5],0,0);
-    }
-    if(argc>6){
-        byte_max= std::stoi(argv[6],0,0);
-    }
-    if(argc>7){
-        n_threads= std::stoi(argv[7],0,0);
+        if(0==strcmp("restrict",argv[5])) usage=2;
+        if(argc==6){
+            std::cerr << "ERROR: restrict must be followed by list of bytes" <<std::endl;
+            std::cerr << "Example: restrict 00_01_02_03" <<std::endl;
+            exit(-1);
+        }
     }
 
     std::cout << "INFO: " << n_threads << " concurrent threads supported in hardware." << std::endl << std::endl;
@@ -321,8 +393,65 @@ int main (int argc, char*argv[]){
     println_128("\tkey_in:       ",key_in);
     println_128("\tplain:        ",plain);
     println_128("\tcipher:       ",cipher);
-    printf(     "\tbyte_min:     0x%02X\n",byte_min);
-    printf(     "\tbyte_max:     0x%02X\n",byte_max);
+
+    unsigned int byte_range=256;
+    uint8_t valid_bytes[256]={0};
+    uint8_t input_bytes[256];
+    switch(usage){
+        case 1:{
+            if(argc>5){
+                byte_min= std::stoi(argv[5],0,0);
+            }
+            if(argc>6){
+                byte_max= std::stoi(argv[6],0,0);
+            }
+            byte_range = byte_max+1;
+            byte_range -= byte_min;
+            unsigned int tmp=0;
+            for(uint32_t i=byte_min;i<=byte_max;i++){
+                input_bytes[tmp++]=i;
+            }
+            printf(     "\tbyte_min:     0x%02X\n",byte_min);
+            printf(     "\tbyte_max:     0x%02X\n",byte_max);
+        }
+        break;
+        case 2:{
+            char buf[256*4+1];
+            cleanup_hexstr((char*)buf,sizeof(buf),argv[6],strlen(argv[6]));
+            byte_range = hexstr_to_bytes(input_bytes,sizeof(input_bytes),buf);
+            byte_max = input_bytes[byte_range-1];//in this usage, those numbers are indexes in valid_bytes
+            byte_min = input_bytes[0];
+        }
+        break;
+    }
+
+    //create a lookup table of valid bytes
+    //such that valid_bytes[current_value]=next_value
+    unsigned int last = byte_min;
+    for(uint32_t i=0;i<byte_range;i++){
+        valid_bytes[last]=input_bytes[i];
+        if(i>0) assert(last < input_bytes[i]);//check values are sorted
+        last = input_bytes[i];
+    }
+    assert(last==byte_max);
+    valid_bytes[byte_max]=byte_min;//not really used right now since we have to detect overflow anyway
+
+    //sanity check
+    {
+        unsigned int range_check=1;
+        uint8_t b=byte_min;
+        while(b!=byte_max){
+            b=valid_bytes[b];
+            range_check++;
+            assert(range_check<=byte_range);
+        }
+        //printf("range_check %u, byte_range %u\n",range_check,byte_range);
+        assert(range_check==byte_range);
+    }
+
+    if(argc>7){
+        n_threads= std::stoi(argv[7],0,0);
+    }
     std::cout << std::endl;
 
     unsigned int offsets[16];
@@ -337,11 +466,8 @@ int main (int argc, char*argv[]){
     std::vector<aes_brute_force *> jobs(n_threads);
     aes_brute_force::reset();
 
-    int byte_range = byte_max+1;
-    byte_range -= byte_min;
-
     //int bit_per_byte = 0;do{bit_per_byte++;}while((1<<bit_per_byte) < byte_range);//round up
-    int bit_per_byte = 1;while((1<<(bit_per_byte+1)) <= byte_range){bit_per_byte++;}//round down
+    unsigned int bit_per_byte = 1;while((1u<<(bit_per_byte+1u)) <= byte_range){bit_per_byte++;}//round down
     //printf("bit_per_byte=%u\n",bit_per_byte);
     //printf("byte_range=%u\n",byte_range);
     if(n_threads>1){
@@ -358,12 +484,15 @@ int main (int argc, char*argv[]){
         println_128("\tjobs_key_mask:",jobs_key_mask);
 
         for(unsigned int thread_i=0;thread_i<n_threads;thread_i++){
-            jobs.at(thread_i) = new aes_brute_force(jobs_key_mask, plain, cipher, byte_min, byte_max);
+            switch(usage){
+                case 1: jobs.at(thread_i) = new aes_brute_force(jobs_key_mask, plain, cipher, byte_min, byte_max);break;
+                case 2: jobs.at(thread_i) = new aes_brute_force(jobs_key_mask, plain, cipher, byte_min, byte_max, valid_bytes, byte_range);break;
+            }
         }
         //printf("n_offsets=%u\n",n_offsets);
         uint32_t n_jobs=1;
         for(unsigned int i=0;i<n_offsets;i++){n_jobs*=byte_range;}
-        printf("n_jobs=%u\n",n_jobs);
+        //printf("n_jobs=%u\n",n_jobs);
         //fix jobs_key_mask bits of the key for each job
         uint8_t cnt8[16];
         memset(cnt8,byte_min,sizeof(cnt8));
@@ -382,7 +511,7 @@ int main (int argc, char*argv[]){
             for(unsigned int i=0;i<b;i++){
                 cnt8[i] = byte_min;
             }
-            cnt8[b]++;
+            cnt8[b] = valid_bytes[cnt8[b]];
         }
     }else{//old code which SEG FAULT when n_threads large and valid range for bytes narrow
         if(n_threads>1){
