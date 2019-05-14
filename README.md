@@ -1,9 +1,18 @@
 [![Build Status](https://travis-ci.org/sebastien-riou/aes-brute-force.svg?branch=master)](https://travis-ci.org/sebastien-riou/aes-brute-force)
 # aes-brute-force
 Using Intel AES-NI and c++ threads to search AES128 keys.
-Sometimes side channel attacks recover most key bytes but not all. This project allows to brute force remaining bytes on commodity hardware. On a i7-4770K CPU @ 3.50GHz, a CPU a few years old, 4 bytes takes under a minute, 5 bytes few hours. Time greatly varies depending on the most significant unknown byte as the search is done using natural order...
+Sometimes side channel attacks recover most key bytes but not all. This project allows to brute force remaining bytes on commodity hardware. 
 
 The AES-NI code is a header only library.
+
+
+## Measured performances
+On a i7-4770K CPU @ 3.50GHz, a CPU a few years old, 4 bytes takes under a minute, 5 bytes few hours. 
+
+[daubsi](https://github.com/OevreFlataeker) reported testing over 1.2 billion keys per seconds using a machine with 4 Xeon E7-8867 v4 @ 2.40GHz.
+
+Search time greatly varies depending on the most significant unknown byte as the search is done using natural order...
+
 
 
 ## Demo on Windows with Intel(R) Core(TM) i7-4770K CPU @ 3.50GHz
